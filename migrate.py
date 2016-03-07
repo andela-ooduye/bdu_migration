@@ -8,7 +8,7 @@ def process(record):
     record = record.strip().split(';')
 
     if '@' in record[0]:
-        record[0] = record[0].split('@')[0]
+        record[0] = chopOffDomain(record[0])
 
     record[2] = dbTime(record[2])
     record[3] = dbTime(record[3])
@@ -22,8 +22,23 @@ def process(record):
 
     return record
 
+def chopOffDomain(email):
+    return email.split('@')[0]
+
 def dbTime(epochTime):
     return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(epochTime)))
+
+def static_vars(**kwargs):
+    def decorate(func):
+        for k in kwargs:
+            setattr(func, k, kwargs[k])
+        return func
+    return decorate
+
+@static_vars(counter=random.randint(0,10000))
+def count():
+     count.counter += 1
+     return count.counter
 
 def insertInDb(table, record, dbConn, fields, values):
     cursor = dbConn.cursor()
@@ -34,7 +49,7 @@ def insertInDb(table, record, dbConn, fields, values):
         tmp = cursor.fetchone()[0]
 
         sqlTmp = sql
-        sqlTmp += " ON DUPLICATE KEY UPDATE username='{0}'".format(record[0] + "{0}".format(random.randint(0,10000)))
+        sqlTmp += " ON DUPLICATE KEY UPDATE username='{0}'".format(record[0] + "{0}".format(count()))
 
         cursor.execute(sqlTmp)
         dbConn.commit()
@@ -60,7 +75,7 @@ def insertInDb(table, record, dbConn, fields, values):
 def startProgressBar(maxval):
     return progressbar.ProgressBar(maxval=maxval, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()]).start()
 
-def createAllUsers(filename, tableUser, tableProfile):
+def createAllUsers(filename, tableUser, tableProfile, dbConn):
     with open(filename, 'r') as records:
         bar = startProgressBar(sum(1 for line in open(filename, 'r')))
         counter = 0
@@ -68,14 +83,6 @@ def createAllUsers(filename, tableUser, tableProfile):
         for record in records:
             bar.update(counter)
             record = process(record)
-
-            if len(record[1]) > 75:
-                f = open('exempted.txt', 'a')
-                f.write("{0}\n".format(record))
-                f.close()
-                continue
-
-            dbConn = MySQLdb.connect("localhost","edxapp001","password","edxapp")
 
             fields = '(username,first_name,last_name,password,email,is_staff,is_active,is_superuser,date_joined,last_login)'
             values = '("{username}","{first_name}","{last_name}","","{email}",0,0,0,"{date_joined}","{last_login}")'.format(username=record[0] if len(record[0]) <= 30 else record[0][:30], first_name=record[4] if len(record[4]) <= 30 else '', last_name=record[5] if len(record[5]) <= 30 else '', email=record[1], date_joined=record[2], last_login=record[3])
@@ -92,9 +99,9 @@ def createAllUsers(filename, tableUser, tableProfile):
         print('Elapsed time is {0} sec'.format(bar.seconds_elapsed))
 
 def processGmailAccount(record):
-    return record[0] if 'gmail' not in record[1] else record[1]
+    return record[0] if 'gmail' not in record[1] and 'googlemail' not in record[1] else record[1]
 
-def linkSocialUsers(filename):
+def linkGoogleUsers(filename, dbConn):
     with open(filename, 'r') as records:
         bar = startProgressBar(sum(1 for line in open(filename, 'r')))
         counter = 0
@@ -102,10 +109,10 @@ def linkSocialUsers(filename):
         for record in records:
             bar.update(counter)
             record = record.strip().split(';')
-            dbConn = MySQLdb.connect("localhost","edxapp001","password","edxapp")
             cursor = dbConn.cursor()
 
-            sql = "SELECT id, email FROM auth_user WHERE email='{record}'".format(record=processGmailAccount(record))
+            tmp = processGmailAccount(record)
+            sql = "SELECT id, email FROM auth_user WHERE email='{email}' OR username='{username}'".format(email=tmp, username=chopOffDomain(tmp))
             cursor.execute(sql)
             dbConn.commit()
 
@@ -119,7 +126,27 @@ def linkSocialUsers(filename):
         bar.finish()
         print('Elapsed time is {0} sec'.format(bar.seconds_elapsed))
 
+def dbConnect():
+    db = {  'host':     'localhost', \
+            'user':     'edxapp001', \
+            'pass': 'password', \
+            'db':       'edxapp', \
+            'port':     3306
+        }
+
+    return MySQLdb.connect(host=db['host'], user=db['user'], passwd=db['pass'], db=db['db'], port=db['port'])
+
+def linkLinkedinUsers(filename, dbConn):
+    print('Hello')
+
 if __name__ == '__main__':
-    # createAllUsers(sys.argv[1], 'auth_user', 'auth_userprofile')
-    linkSocialUsers(sys.argv[1])
-    print('Elapsed time is {0} sec'.format(time.clock()))
+    dbConn = dbConnect()
+
+    if sys.argv[1] == '--create-accounts':
+        createAllUsers(sys.argv[2], 'auth_user', 'auth_userprofile', dbConn)
+
+    if sys.argv[1] == '--link-to-google':
+        linkGoogleUsers(sys.argv[2], dbConn)
+
+    if sys.argv[1] == '--link-to-linkedin':
+        linkLinkedinUsers(sys.argv[2], dbConn)

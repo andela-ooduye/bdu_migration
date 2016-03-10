@@ -3,6 +3,8 @@ import time
 import random
 import sys
 import progressbar
+import uuid
+from simplecrypt import encrypt
 
 def process(record, duplicate=False):
     record = record.strip().split(';')
@@ -126,33 +128,6 @@ def count():
      count.counter += 1
      return count.counter
 
-def insertInDb(table, record, dbConn, fields, values):
-    cursor = dbConn.cursor()
-    sql = "INSERT INTO " + table + " " + fields + " VALUES " + values
-
-    if table == 'auth_user':
-        cursor.execute("SELECT MAX(id) FROM " + table)
-        tmp = cursor.fetchone()[0]
-
-        sqlTmp = sql
-        sqlTmp += " ON DUPLICATE KEY UPDATE username='{0}'".format(record[0] + "{0}".format(count()))
-
-        cursor.execute(sqlTmp)
-        dbConn.commit()
-        new = cursor.lastrowid
-
-        if new <= tmp:
-            cursor.execute(sql)
-            dbConn.commit()
-            new = cursor.lastrowid
-
-        return new
-
-    else:
-        cursor.execute(sql)
-        dbConn.commit()
-        return cursor.lastrowid
-
 def startProgressBar(maxval):
     return progressbar.ProgressBar(maxval=maxval, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()]).start()
 
@@ -188,13 +163,79 @@ def populateProfileTable(tableUser, tableProfile, record, dbConn):
 
     insertInDb(tableProfile, record, dbConn, fields, values)
 
-def processGmailAccount(record):
-    return record[0] if 'gmail' not in record[1] and 'googlemail' not in record[1] else record[1]
+def populateSocialAuthTable(table, record, dbConn, user, provider):
+    fbid = ''
+
+    if provider == 'facebook':
+        tmp = record[2].strip().strip('/').split('//www.facebook.com/')
+
+        if 'profile.php?id=' in tmp[1]:
+            fbid += tmp[1].split('=')[1]
+        elif 'app_scoped_user_id/' in tmp[1]:
+            fbid += tmp[1].split('/')[1]
+        else:
+            fbid += tmp[1]
+
+    fields = '(user_id,provider,uid,extra_data)'
+    values = "('{id}', '{provider}', '{uid}', '')".format(id=user[0], provider=provider, uid=user[1] if provider == 'google-oauth2' else fbid)
+
+    insertInDb(table, record, dbConn, fields, values)
+
+
+def insertInDb(table, record, dbConn, fields, values):
+    cursor = dbConn.cursor()
+    sql = "INSERT {flag} INTO {table} {field} VALUES {value}".format(flag='IGNORE' if table == 'social_auth_usersocialauth' else '',table=table,field=fields,value=values)
+
+    if table == 'auth_user':
+
+        try:
+            cursor.execute("SELECT MAX(id) FROM " + table)
+            tmp = cursor.fetchone()[0]
+
+            sqlTmp = sql
+            sqlTmp += " ON DUPLICATE KEY UPDATE username='{0}'".format(record[0] + "{0}".format(count()))
+
+            cursor.execute(sqlTmp)
+            dbConn.commit()
+            new = cursor.lastrowid
+
+            if new <= tmp:
+                cursor.execute(sql)
+                dbConn.commit()
+                new = cursor.lastrowid
+
+            return new
+        except:
+            last = open('last_record.txt', 'w')
+            last.write('{0}'.format(record))
+
+    else:
+        try:
+            cursor.execute(sql)
+            dbConn.commit()
+            return cursor.lastrowid
+        except:
+            last = open('last_record.txt', 'w')
+            last.write('{0}'.format(record))
+
+def getSocialAccountEmail(record, provider):
+    if provider == 'google-oauth2':
+        return record[0] if 'gmail' not in record[1] and 'googlemail' not in record[1] else record[1]
+    elif provider == 'facebook':
+        return record[1]
 
 def linkGoogleUsers(filename, dbConn):
     print('Linking Google-auth accounts...')
+    linkSocialUsers(filename, dbConn, 'google-oauth2')
+
+def linkFacebookUsers(filename, dbConn):
+    print('Linking Facebook-auth accounts...')
+    linkSocialUsers(filename, dbConn, 'facebook')
+
+def linkSocialUsers(filename, dbConn, provider):
     bar = startProgressBar(sum(1 for line in open(filename, 'r')))
     counter = 0
+    notFound = open('not_found.txt', 'a')
 
     with open(filename, 'r') as records:
         for record in records:
@@ -202,23 +243,26 @@ def linkGoogleUsers(filename, dbConn):
             record = record.strip().split(';')
             cursor = dbConn.cursor()
 
-            tmp = processGmailAccount(record)
-            sql = "SELECT id, email FROM auth_user WHERE email='{email}' OR username='{username}'".format(email=tmp, username=chopOffDomain(tmp))
+            email = getSocialAccountEmail(record, provider)
+            sql = "SELECT id, email FROM auth_user WHERE email='{email}'".format(email=email)
+
+            if provider == 'google':
+                sql += " OR username='{username}'".format(username=chopOffDomain(email))
+
             cursor.execute(sql)
             dbConn.commit()
 
             user = cursor.fetchone()
-
-            insertSql = "INSERT INTO social_auth_usersocialauth (user_id,provider,uid,extra_data) VALUES ('{id}', 'google-oauth2', '{record}', '')".format(id=user[0], record=user[1])
-            cursor.execute(insertSql)
-            dbConn.commit()
             counter += 1
+
+            if user is None:
+                notFound.write('{0}\n'.format(record))
+                continue
+
+            populateSocialAuthTable('social_auth_usersocialauth', record, dbConn, user, provider)
 
         bar.finish()
         print('Linking time was {0} sec.'.format(bar.seconds_elapsed))
-
-def linkLinkedinUsers(filename, dbConn):
-    print('Hello')
 
 def dbConnect():
     db = {  'host':     'localhost', \
@@ -243,8 +287,5 @@ if __name__ == '__main__':
     if sys.argv[1] == '--link-to-google':
         linkGoogleUsers(sys.argv[2], dbConn)
 
-    if sys.argv[1] == '--link-to-linkedin':
-        linkLinkedinUsers(sys.argv[2], dbConn)
-
-    # if sys.argv[1] == '--test':
-    #     print(processDuplicateAccounts(sys.argv[2]))
+    if sys.argv[1] == '--link-to-facebook':
+        linkFacebookUsers(sys.argv[2], dbConn)
